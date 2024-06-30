@@ -1,0 +1,219 @@
+---
+title: "AE1812 Zim RDA"
+author: "Setta"
+date: "August 5, 2020"
+output: html_document
+---
+
+#### Load in data and libraries
+
+```{r setup, include=FALSE}
+setwd("WorkingDir/AE1812_MiSeq_11182019/Cutadapt_primersRemoved/zim")
+```
+
+# Load packages
+```{r, include=FALSE}
+# BiocManager::install("DESeq2")
+library("DESeq2")
+library("phyloseq")
+library("vegan")
+library("ggplot2")
+library("tidyr")
+library("viridis")
+library("tidyverse")
+library("RColorBrewer")
+library("dendextend")
+##  Install packages for Gloor et al. 2017:
+library("knitr")
+# BiocManager::install("ALDEx2")
+library("ALDEx2")
+# install.packages('devtools')
+# devtools::install_github('ggloor/CoDaSeq/CoDaSeq')
+library("CoDaSeq")
+library("zCompositions")
+library("igraph")
+library("grDevices")
+library("propr")
+library("car")
+```
+
+### Load data
+```{r, results='hide'}
+# Count Table:
+zcount_tab <- read.csv("Zim_BacInsitu200Filt_CountTab.csv", header=T, row.names=1,check.names=F, sep=",")
+# Taxonomy File:
+ztax_tab_pr2 <- as.matrix(read.csv("Zim_BacInsitu200Filt_TaxTab.csv", header=T, row.names=1,check.names=F, sep=","))
+# Info Table:
+zsample_info_tab <- read.csv("Zim_BacInsitu200Filt_InfoTab.csv", header=T, row.names=1,check.names=F, sep=",")
+# Look into sample info table:
+str(zsample_info_tab)
+# read in pore size as a factor:
+zsample_info_tab$Pore_Size_um<-as.factor(zsample_info_tab$Pore_Size_um)
+# read in DCM as numerical
+zsample_info_tab$DCM_m<-as.numeric(zsample_info_tab$DCM_m)
+# read in Region as a factor
+zsample_info_tab$Region<-as.factor(zsample_info_tab$Region)
+# read in Sample_or_Blank as a factor
+zsample_info_tab$Sample_or_Blank<-as.factor(zsample_info_tab$Sample_or_Blank)
+# read in Exp_Region as a factor
+zsample_info_tab$Exp_Region<-as.factor(zsample_info_tab$Exp_Region)
+# read in CastID as a factor
+zsample_info_tab$CastID<-as.factor(zsample_info_tab$CastID)
+# read in InSitu_Exp as a factor
+zsample_info_tab$InSitu_Exp<-as.factor(zsample_info_tab$InSitu_Exp)
+# read in Treatment as a factor
+zsample_info_tab$Treatment<-as.factor(zsample_info_tab$Treatment)
+# check data structure again:
+str(zsample_info_tab)
+
+# Create phyloseq object using our un-transformed count table
+zcount_tab_phy <- otu_table(zcount_tab, taxa_are_rows=T)
+ztax_tab_pr2_phy <- tax_table(ztax_tab_pr2)
+zsample_info_tab_phy <- sample_data(zsample_info_tab)
+z_ASV_physeq <- phyloseq(zcount_tab_phy, ztax_tab_pr2_phy, zsample_info_tab_phy)
+
+```
+
+### Remove samples without environmental variables
+```{r}
+# Cast 52 (SPS 34 & 35, S20A) does not have any environmental variables
+z_insitu<-subset_samples(z_insitu, Cast!="52")
+
+# remove samples without complete environmental variables:
+z_insitu<-subset_samples(z_insitu, SampleID!="AE1812 197" & SampleID!="AE1812 336" & SampleID!="AE1812 340")
+z_insitu_otu<-t(otu_table(z_insitu))
+```
+
+## Part One: Transformations of raw data
+
+### Step 1: Hellinger & Cord Transformation of data using vegan
+```{r}
+# remove samples without complete environmental variables:
+z_insitu<-subset_samples(z_insitu, SampleID!="AE1812 197" & SampleID!="AE1812 336" & SampleID!="AE1812 340")
+z_insitu_otu<-t(otu_table(z_insitu))
+# Incubations
+z_incub_otu<-t(otu_table(z_incub))
+# Transform data using the vegan function decostand (standardization methods for community ecology)
+# first for the cord transformation:
+z_insitu_cord<-decostand(z_insitu_otu, method="normalize")
+z_incub_cord<-decostand(z_incub_otu, method="normalize")
+# next for the hellinger transformation:
+z_insitu_hell<-decostand(z_insitu_otu, method="hellinger")
+z_incub_hell<-decostand(z_incub_otu, method="hellinger")
+```
+
+### Step 2: Transformation of Environmental Data
+
+Check to see if data is normal to begin, and if there are any outliers in data etc.
+```{r}
+# Environmental components:
+z_insitu_env<-data.frame(sample_data(z_insitu))
+# First check and see if environmental data is normal - Insitu env variables
+z_insitu_env
+qqPlot(z_insitu_env$SiO2_umolL)
+qqPlot(z_insitu_env$Nit_Nit_umolL)
+qqPlot(z_insitu_env$DON_umolL)
+qqPlot(z_insitu_env$SRP_umolL)
+qqPlot(z_insitu_env$temperature)
+qqPlot(z_insitu_env$CPAR)
+# most are not normal
+
+# most are not normal
+z_insitu_env1<-z_insitu_env[,c(3,4,8,9,26,30)]
+
+z_insitu_env1<-z_insitu_env1[complete.cases(z_insitu_env1),]
+
+pairs(z_insitu_env1, lower.panel = NULL)
+# DIN and Nit_Nit correlated...can't do both, we'll use Nit_Nit because data set is more full (Amm only above detection in some samples)
+```
+
+After checking that there are outliers and most data is not normally transformed we can apply a  pseudocount (+1) and log10 transformation
+```{r}
+# Transform M3 samples with all variables first
+z_insitu_env_transf<-log10(z_insitu_env1)
+```
+
+Look at normality in data again:
+```{r}
+# In Situ Samples First
+z_insitu_env_transf
+qqPlot(z_insitu_env_transf$SiO2_umolL)
+qqPlot(z_insitu_env_transf$Nit_Nit_umolL)
+qqPlot(z_insitu_env_transf$DON_umolL)
+qqPlot(z_insitu_env_transf$SRP_umolL)
+qqPlot(z_insitu_env_transf$temperature)
+qqPlot(z_insitu_env_transf$CPAR)
+
+# most look better - will find out if these transformations make a difference in RDAs
+```
+
+
+I will keep the log transformation of Nit_Nit, DON and CPAR:
+```{r}
+# In Situ Samples First
+z_insitu_env2<-z_insitu_env1
+# Nit_Nit transformation:
+z_insitu_env2$Log_Nit<-log10(z_insitu_env2$Nit_Nit_umolL)
+# SRP transformation:
+z_insitu_env2$Log_SRP<-log10(z_insitu_env2$SRP_umolL)
+# CPAR transformation:
+z_insitu_env2$Log_CPAR<-log10(z_insitu_env2$CPAR)
+
+# All variables to use for RDA
+zim_env_rda<-z_insitu_env2[,c(1,3,5,7:9)]
+```
+
+
+## Part Two: RDA of all combinations of transformed and untransformed data
+
+Now we have hellinger transformed data and a few environmental variables log transformed (Nit_Nit, SRP, CPAR).
+
+Will create an RDA and PERMANOVA with these to see if significant associations change based on transformations.
+
+##### Hellinger Transformed
+
+In situ samples original data with no environmental transformation
+```{r}
+# First run RDA
+insitu_rda_tree = rda(z_insitu_otu ~ SiO2_umolL + Nit_Nit_umolL + DON_umolL + SRP_umolL + temperature + CPAR, data=z_insitu_env1)
+insitu_rda_tree
+# Calculate R-squared value
+RsquareAdj(insitu_rda_tree)
+# Look at Samples that are driven by environmental variables
+par(mfrow=c(1, 1))
+plot(insitu_rda_tree, type='n', scaling=1)
+orditorp(insitu_rda_tree, display='site', cex=0.9, scaling=1, col='blue')
+text(insitu_rda_tree, display='cn', col='red')
+# Look at OTUs that are driven by environmental variables:
+plot(insitu_rda_tree, type='n', scaling=1)
+orditorp(insitu_rda_tree, display='sp', cex=0.9, scaling=1, col='black')
+text(insitu_rda_tree, display='cn', col='red')
+# Run Permanova statistical test
+adonis2(z_insitu_otu ~ SiO2_umolL + Nit_Nit_umolL + DON_umolL + SRP_umolL + temperature + CPAR, data=z_insitu_env1)
+# Silicate, Nit/Nit, DON, SRP significant
+
+```
+
+
+In situ samples transformed data with environmental transformation (as needed)
+```{r}
+# First run RDA
+insitu_rda_tree2 = rda(z_insitu_hell ~ SiO2_umolL + DON_umolL + Log_Nit + Log_SRP , data=zim_env_rda)
+insitu_rda_tree2
+# Calculate R-squared value
+RsquareAdj(insitu_rda_tree)
+# Look at Samples that are driven by environmental variables
+par(mfrow=c(1, 1))
+plot(insitu_rda_tree2, type='n', scaling=1)
+orditorp(insitu_rda_tree2, display='site', cex=0.9, scaling=1, col='blue')
+text(insitu_rda_tree2, display='cn', col='red')
+# Look at OTUs that are driven by environmental variables:
+plot(insitu_rda_tree2, type='n', scaling=1)
+orditorp(insitu_rda_tree2, display='sp', cex=0.9, scaling=1, col='black')
+text(insitu_rda_tree2, display='cn', col='red')
+# Run Permanova statistical test
+adonis2(z_insitu_hell ~ SiO2_umolL + DON_umolL + Log_Nit + Log_SRP , data=zim_env_rda)
+# Silicate, Nit/Nit, DON, SRP significant
+
+```
+
